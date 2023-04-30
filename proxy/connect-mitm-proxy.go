@@ -226,7 +226,14 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		changeRequestToTarget(r, proxyReq.Host)
 
 		// Send the request to the target server and log the response.
-		resp, err := http.DefaultClient.Do(r)
+		// Disable http 2.0
+		httpClient := &http.Client{
+			Transport: &http.Transport{
+				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			},
+		}
+		//resp, err := http.DefaultClient.Do(r)
+		resp, err := httpClient.Do(r)
 		if err != nil {
 			log.Fatal("error sending request to target:", err)
 		}
