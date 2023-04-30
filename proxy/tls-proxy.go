@@ -144,6 +144,24 @@ func (p *mitmProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func createProxyToServerClient() *http.Client {
+	// Read the key pair to create certificate
+	cert, err := tls.LoadX509KeyPair("cba_cert.pem", "cba_key.pem")
+	if err != nil {
+		log.Fatal(err)
+	}
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			},
+			// Disable http 2.0
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
+	return httpClient
+}
+
 // proxyConnect implements the MITM proxy for CONNECT tunnels.
 func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
 	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
@@ -226,21 +244,8 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		changeRequestToTarget(r, proxyReq.Host)
 
 		// Send the request to the target server and log the response.
-		
-		// Read the key pair to create certificate
-		cert, err := tls.LoadX509KeyPair("cba_cert.pem", "cba_key.pem")
-		if err != nil {
-			log.Fatal(err)
-		}
-		httpClient := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					Certificates: []tls.Certificate{cert},
-				},
-				// Disable http 2.0
-				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-			},
-		}
+		httpClient := createProxyToServerClient()
+
 		//resp, err := http.DefaultClient.Do(r)
 		resp, err := httpClient.Do(r)
 		if err != nil {
