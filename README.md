@@ -11,18 +11,11 @@ python -m pip install -r requirements.txt
 
 Open another terminal, and go to the `proxy` folder.
 
-## Test 1: use the connect-tunnel proxy
+First create `cba_cert.pem` and `cba_key.pem`.
 
+Next run the proxy,
 ```
-go run -v connect-tunnel-proxy.go
-```
-
-Then run the python app in the previous terminal `python app.py`.
-
-## Test 2: use the connect-mitm proxy
-
-```
-go run -v connect-mitm-proxy.go -cacertfile ./certs/rootCA.pem -cakeyfile ./certs/rootCA-key.pem
+go run -v tls-proxy.go -cacertfile ./certs/rootCA.pem -cakeyfile ./certs/rootCA-key.pem
 ```
 
 Then run the python app in the previous terminal `python app.py`.
