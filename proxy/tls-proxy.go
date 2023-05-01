@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"io"
 	"io/ioutil"
@@ -30,7 +31,38 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/googleapis/enterprise-certificate-proxy/client"
 )
+
+type ecpSource struct {
+	key *client.Key
+}
+
+type Source func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
+
+func NewEnterpriseCertificateProxySource(configFilePath string) (Source, error) {
+	var errSourceUnavailable = errors.New("certificate source is unavailable")
+
+	key, err := client.Cred(configFilePath)
+	if err != nil {
+		if errors.Is(err, client.ErrCredUnavailable) {
+			return nil, errSourceUnavailable
+		}
+		return nil, err
+	}
+
+	return (&ecpSource{
+		key: key,
+	}).getClientCertificate, nil
+}
+
+func (s *ecpSource) getClientCertificate(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	var cert tls.Certificate
+	cert.PrivateKey = s.key
+	cert.Certificate = s.key.CertificateChain()
+	return &cert, nil
+}
 
 // createCert creates a new certificate/private key pair for the given domains,
 // signed by the parent/parentKey certificate. hoursValid is the duration of
@@ -144,7 +176,25 @@ func (p *mitmProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func createProxyToServerClient() *http.Client {
+func createProxyToServerEcpClient() *http.Client {
+	clientCertSource, err := NewEnterpriseCertificateProxySource("/usr/local/google/home/sijunliu/.config/gcloud/certificate_config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				GetClientCertificate: clientCertSource,
+			},
+			// Disable http 2.0
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
+	return httpClient
+}
+
+func createProxyToServerCbaClient() *http.Client {
 	// Read the key pair to create certificate
 	cert, err := tls.LoadX509KeyPair("cba_cert.pem", "cba_key.pem")
 	if err != nil {
@@ -244,7 +294,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		changeRequestToTarget(r, proxyReq.Host)
 
 		// Send the request to the target server and log the response.
-		httpClient := createProxyToServerClient()
+		httpClient := createProxyToServerEcpClient()
 
 		//resp, err := http.DefaultClient.Do(r)
 		resp, err := httpClient.Do(r)
