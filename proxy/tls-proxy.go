@@ -425,8 +425,14 @@ func addrToUrl(addr string) *url.URL {
 
 func main() {
 	var addr = flag.String("addr", "127.0.0.1:9999", "proxy address")
-	caCertFile := flag.String("cacertfile", "/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_cert.pem", "certificate .pem file for trusted CA")
-	caKeyFile := flag.String("cakeyfile", "/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_private_key.pem", "key .pem file for trusted CA")
+	currentDir, err := os.Getwd()
+	if err != nil {
+		fmt.Println(err)
+	}
+	caCertFilePath := filepath.Join(currentDir, "certs", "ca_cert.pem")
+	caKeyFilePath := filepath.Join(currentDir, "certs", "ca_private_key.pem")
+	caCertFile := flag.String("cacertfile", caCertFilePath, "certificate .pem file for trusted CA")
+	caKeyFile := flag.String("cakeyfile", caKeyFilePath, "key .pem file for trusted CA")
 	useEcp := flag.Bool("useEcp", true, "If true use ECP otherwise use CBA as the cert source")
 	flag.Parse()
 
