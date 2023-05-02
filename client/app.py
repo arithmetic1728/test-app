@@ -5,7 +5,7 @@ credentials, _ = google.auth.default()
 project = "sijunliu-dca-test"
 
 proxies = {
-  'http': 'http://127.0.0.1:9999',
+  #'http': 'http://127.0.0.1:9999',
   'https': 'http://127.0.0.1:9999',
 }
 
@@ -15,6 +15,6 @@ if __name__ == "__main__":
         'GET',
         f'https://pubsub.mtls.googleapis.com/v1/projects/{project}/topics',
         proxies=proxies,
-        verify=False
+        verify="/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_cert.pem"
     )
     print(response.status_code)

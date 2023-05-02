@@ -1,12 +1,3 @@
-// Implements a tunneling forward proxy for CONNECT requests, while also
-// MITM-ing the connection and dumping the HTTPs requests/responses that cross
-// the tunnel.
-//
-// Requires a certificate/key for a CA trusted by clients in order to generate
-// and sign fake TLS certificates.
-//
-// Eli Bendersky [https://eli.thegreenplace.net]
-// This code is in the public domain.
 package main
 
 import (
@@ -18,9 +9,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -29,21 +22,123 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/googleapis/enterprise-certificate-proxy/client"
 )
 
+//============================= 1. cert utilities ========================
+
+type Source func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
+
+var errSourceUnavailable = errors.New("certificate source is unavailable")
+
+//========== 1.1 CBA cert ===============
+
+type secureConnectMetadata struct {
+	Cmd []string `json:"cert_provider_command"`
+}
+
+type secureConnectSource struct {
+	metadata secureConnectMetadata
+
+	// Cache the cert to avoid executing helper command repeatedly.
+	cachedCertMutex sync.Mutex
+	cachedCert      *tls.Certificate
+}
+
+func NewSecureConnectSource() (Source, error) {
+	user, err := user.Current()
+	if err != nil {
+		// Error locating the default config means Secure Connect is not supported.
+		return nil, errSourceUnavailable
+	}
+	configFilePath := filepath.Join(user.HomeDir, ".secureConnect", "context_aware_metadata.json")
+
+	file, err := ioutil.ReadFile(configFilePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Config file missing means Secure Connect is not supported.
+			return nil, errSourceUnavailable
+		}
+		return nil, err
+	}
+
+	var metadata secureConnectMetadata
+	if err := json.Unmarshal(file, &metadata); err != nil {
+		return nil, fmt.Errorf("cert: could not parse JSON in %q: %w", configFilePath, err)
+	}
+	if err := validateMetadata(metadata); err != nil {
+		return nil, fmt.Errorf("cert: invalid config in %q: %w", configFilePath, err)
+	}
+	return (&secureConnectSource{
+		metadata: metadata,
+	}).getClientCertificate, nil
+}
+
+func validateMetadata(metadata secureConnectMetadata) error {
+	if len(metadata.Cmd) == 0 {
+		return errors.New("empty cert_provider_command")
+	}
+	return nil
+}
+
+func (s *secureConnectSource) getClientCertificate(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	s.cachedCertMutex.Lock()
+	defer s.cachedCertMutex.Unlock()
+	if s.cachedCert != nil && !isCertificateExpired(s.cachedCert) {
+		return s.cachedCert, nil
+	}
+	// Expand OS environment variables in the cert provider command such as "$HOME".
+	for i := 0; i < len(s.metadata.Cmd); i++ {
+		s.metadata.Cmd[i] = os.ExpandEnv(s.metadata.Cmd[i])
+	}
+	command := s.metadata.Cmd
+	data, err := exec.Command(command[0], command[1:]...).Output()
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(data, data)
+	if err != nil {
+		return nil, err
+	}
+	s.cachedCert = &cert
+	return &cert, nil
+}
+
+// isCertificateExpired returns true if the given cert is expired or invalid.
+func isCertificateExpired(cert *tls.Certificate) bool {
+	if len(cert.Certificate) == 0 {
+		return true
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return true
+	}
+	return time.Now().After(parsed.NotAfter)
+}
+
+//=================== 1.2 ECP cert ====================
+
 type ecpSource struct {
 	key *client.Key
 }
 
-type Source func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
-
 func NewEnterpriseCertificateProxySource(configFilePath string) (Source, error) {
-	var errSourceUnavailable = errors.New("certificate source is unavailable")
-
+	if configFilePath == "" {
+		user, err := user.Current()
+		if err != nil {
+			// Error locating the default config means Secure Connect is not supported.
+			return nil, errSourceUnavailable
+		}
+		configFilePath = filepath.Join(user.HomeDir, ".config", "gcloud", "certificate_config.json")
+	}
 	key, err := client.Cred(configFilePath)
 	if err != nil {
 		if errors.Is(err, client.ErrCredUnavailable) {
@@ -63,6 +158,8 @@ func (s *ecpSource) getClientCertificate(info *tls.CertificateRequestInfo) (*tls
 	cert.Certificate = s.key.CertificateChain()
 	return &cert, nil
 }
+
+//============================== 2. Proxy ===============================
 
 // createCert creates a new certificate/private key pair for the given domains,
 // signed by the parent/parentKey certificate. hoursValid is the duration of
@@ -148,12 +245,13 @@ func loadX509KeyPair(certFile, keyFile string) (cert *x509.Certificate, key any,
 type mitmProxy struct {
 	caCert *x509.Certificate
 	caKey  any
+	useEcp bool
 }
 
 // createMitmProxy creates a new MITM proxy. It should be passed the filenames
 // for the certificate and private key of a certificate authority trusted by the
 // client's machine.
-func createMitmProxy(caCertFile, caKeyFile string) *mitmProxy {
+func createMitmProxy(caCertFile, caKeyFile string, useEcp bool) *mitmProxy {
 	log.Println("creating the proxy")
 	caCert, caKey, err := loadX509KeyPair(caCertFile, caKeyFile)
 	if err != nil {
@@ -164,6 +262,7 @@ func createMitmProxy(caCertFile, caKeyFile string) *mitmProxy {
 	return &mitmProxy{
 		caCert: caCert,
 		caKey:  caKey,
+		useEcp: useEcp,
 	}
 }
 
@@ -176,8 +275,14 @@ func (p *mitmProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func createProxyToServerEcpClient() *http.Client {
-	clientCertSource, err := NewEnterpriseCertificateProxySource("/usr/local/google/home/sijunliu/.config/gcloud/certificate_config.json")
+func createProxyToServerClient(useEcp bool) *http.Client {
+	var clientCertSource Source
+	var err error
+	if useEcp {
+		clientCertSource, err = NewEnterpriseCertificateProxySource("")
+	} else {
+		clientCertSource, err = NewSecureConnectSource()
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -186,24 +291,6 @@ func createProxyToServerEcpClient() *http.Client {
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				GetClientCertificate: clientCertSource,
-			},
-			// Disable http 2.0
-			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		},
-	}
-	return httpClient
-}
-
-func createProxyToServerCbaClient() *http.Client {
-	// Read the key pair to create certificate
-	cert, err := tls.LoadX509KeyPair("cba_cert.pem", "cba_key.pem")
-	if err != nil {
-		log.Fatal(err)
-	}
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
 			},
 			// Disable http 2.0
 			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
@@ -294,7 +381,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		changeRequestToTarget(r, proxyReq.Host)
 
 		// Send the request to the target server and log the response.
-		httpClient := createProxyToServerEcpClient()
+		httpClient := createProxyToServerClient(p.useEcp)
 
 		//resp, err := http.DefaultClient.Do(r)
 		resp, err := httpClient.Do(r)
@@ -338,11 +425,12 @@ func addrToUrl(addr string) *url.URL {
 
 func main() {
 	var addr = flag.String("addr", "127.0.0.1:9999", "proxy address")
-	caCertFile := flag.String("cacertfile", "", "certificate .pem file for trusted CA")
-	caKeyFile := flag.String("cakeyfile", "", "key .pem file for trusted CA")
+	caCertFile := flag.String("cacertfile", "/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_cert.pem", "certificate .pem file for trusted CA")
+	caKeyFile := flag.String("cakeyfile", "/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_private_key.pem", "key .pem file for trusted CA")
+	useEcp := flag.Bool("useEcp", true, "If true use ECP otherwise use CBA as the cert source")
 	flag.Parse()
 
-	proxy := createMitmProxy(*caCertFile, *caKeyFile)
+	proxy := createMitmProxy(*caCertFile, *caKeyFile, *useEcp)
 
 	log.Println("Starting proxy server on", *addr)
 	if err := http.ListenAndServe(*addr, proxy); err != nil {

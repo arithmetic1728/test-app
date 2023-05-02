@@ -11,7 +11,7 @@ python -m pip install -r requirements.txt
 
 Open another terminal, and go to the `proxy` folder.
 
-First create `cba_cert.pem` and `cba_key.pem`.
+First go to the `cert` folder, run `./generate_cert.sh`. This will generate the CA cert and private key.
 
 Next run the proxy,
 ```
