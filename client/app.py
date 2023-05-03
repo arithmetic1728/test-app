@@ -12,27 +12,40 @@ proxies = {
 
 ca_cert_path = os.path.join(os.getcwd(), os.pardir, "proxy", "certs", "ca_cert.pem")
 
-def run_with_http():
+def run_with_http(stream=False):
   authed_session = AuthorizedSession(credentials)
   response = authed_session.request(
       'GET',
       f'http://pubsub.mtls.googleapis.com/v1/projects/{project}/topics',
       proxies=proxies,
-      verify=False
+      verify=False,
+      stream=stream
   )
-  print(response.status_code)
+  if stream:
+    for line in response.iter_lines():
+      if line:
+          print(line)
+  else:
+    print(response.text)
 
-def run_with_https():
+def run_with_https(stream=False):
   authed_session = AuthorizedSession(credentials)
   response = authed_session.request(
       'GET',
       f'https://pubsub.mtls.googleapis.com/v1/projects/{project}/topics',
       proxies=proxies,
-      verify=ca_cert_path
+      verify=ca_cert_path,
+      stream=True
   )
-  print(response.status_code)
-   
+  if stream:
+    for line in response.iter_lines():
+      if line:
+          print(line)
+  else:
+    print(response.text)
 
 if __name__ == "__main__":
-  #run_with_http()
+  # run_with_http()
+  # run_with_http(stream=True)
   run_with_https()
+  run_with_https(stream=True)
