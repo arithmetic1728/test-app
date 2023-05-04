@@ -431,7 +431,7 @@ func (p *mitmProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Reque
 func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
 	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
 
-	if strings.Contains(proxyReq.Host, "googleapis.com") {
+	if strings.Contains(proxyReq.Host, "mtls.googleapis.com") {
 		log.Println("Using MITM proxy")
 		p.proxyConnectMitm(w, proxyReq)
 	} else {
