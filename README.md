@@ -26,6 +26,23 @@ go run -v tls-proxy.go -useEcp true
 
 Then run the python app in the previous terminal `python app.py`.
 
+# use gcloud
+
+First run the proxy, then set up gcloud as follows:
+
+```
+gcloud config set proxy/type http
+gcloud config set proxy/address localhost
+gcloud config set proxy/port 9999
+gcloud config set core/custom_ca_certs_file /usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_cert.pem
+gcloud config set context_aware/use_client_certificate true
+```
+
+Then run
+```
+gcloud pubsub topics list
+```
+
 
 
 
