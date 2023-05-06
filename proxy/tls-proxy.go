@@ -243,15 +243,16 @@ func loadX509KeyPair(certFile, keyFile string) (cert *x509.Certificate, key any,
 // mitmProxy is a type implementing http.Handler that serves as a MITM proxy
 // for CONNECT tunnels. Create new instances of mitmProxy using createMitmProxy.
 type mitmProxy struct {
-	caCert *x509.Certificate
-	caKey  any
-	useEcp bool
+	caCert            *x509.Certificate
+	caKey             any
+	useEcp            bool
+	callCustomerProxy bool
 }
 
 // createMitmProxy creates a new MITM proxy. It should be passed the filenames
 // for the certificate and private key of a certificate authority trusted by the
 // client's machine.
-func createMitmProxy(caCertFile, caKeyFile string, useEcp bool) *mitmProxy {
+func createMitmProxy(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *mitmProxy {
 	log.Println("creating the proxy")
 	caCert, caKey, err := loadX509KeyPair(caCertFile, caKeyFile)
 	if err != nil {
@@ -260,9 +261,10 @@ func createMitmProxy(caCertFile, caKeyFile string, useEcp bool) *mitmProxy {
 	log.Printf("loaded CA certificate and key; IsCA=%v\n", caCert.IsCA)
 
 	return &mitmProxy{
-		caCert: caCert,
-		caKey:  caKey,
-		useEcp: useEcp,
+		caCert:            caCert,
+		caKey:             caKey,
+		useEcp:            useEcp,
+		callCustomerProxy: callCustomerProxy,
 	}
 }
 
@@ -275,7 +277,7 @@ func (p *mitmProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func createProxyToServerClient(useEcp bool) *http.Client {
+func createProxyToServerClient(useEcp bool, callCustomerProxy bool) *http.Client {
 	var clientCertSource Source
 	var err error
 	if useEcp {
@@ -287,6 +289,20 @@ func createProxyToServerClient(useEcp bool) *http.Client {
 		log.Fatal(err)
 	}
 
+	if callCustomerProxy {
+		customerProxy, _ := url.Parse("http://127.0.0.1:8888")
+		httpClient := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					GetClientCertificate: clientCertSource,
+				},
+				// Disable http 2.0
+				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+				Proxy:        http.ProxyURL(customerProxy),
+			},
+		}
+		return httpClient
+	}
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
@@ -409,7 +425,7 @@ func (p *mitmProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Reque
 		changeRequestToTarget(r, proxyReq.Host)
 
 		// Send the request to the target server and log the response.
-		httpClient := createProxyToServerClient(p.useEcp)
+		httpClient := createProxyToServerClient(p.useEcp, p.callCustomerProxy)
 
 		//resp, err := http.DefaultClient.Do(r)
 		resp, err := httpClient.Do(r)
@@ -474,9 +490,10 @@ func main() {
 	caCertFile := flag.String("cacertfile", caCertFilePath, "certificate .pem file for trusted CA")
 	caKeyFile := flag.String("cakeyfile", caKeyFilePath, "key .pem file for trusted CA")
 	useEcp := flag.Bool("useEcp", true, "If true use ECP otherwise use CBA as the cert source")
+	callCustomerProxy := flag.Bool("callCustomerProxy", false, "If true ECP proxy will call customer proxy at http://127.0.0.1:8888")
 	flag.Parse()
 
-	proxy := createMitmProxy(*caCertFile, *caKeyFile, *useEcp)
+	proxy := createMitmProxy(*caCertFile, *caKeyFile, *useEcp, *callCustomerProxy)
 
 	log.Println("Starting proxy server on", *addr)
 	if err := http.ListenAndServe(*addr, proxy); err != nil {
