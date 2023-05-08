@@ -304,91 +304,9 @@ func createCert(dnsNames []string, parent *x509.Certificate, parentKey crypto.Pr
 
 //============================== 2. Proxy ===============================
 
-// AuthProxy is a type implementing http.Handler that serves as a MITM proxy
-// for CONNECT tunnels. Create new instances of AuthProxy using createAuthProxy.
-type AuthProxy struct {
-	caCert            *x509.Certificate
-	caKey             crypto.PrivateKey
-	useEcp            bool
-	callCustomerProxy bool
-}
+//========== 2.1 Conventional pass through proxy ========================
 
-// createAuthProxy creates a new MITM proxy. It should be passed the filenames
-// for the certificate and private key of a certificate authority trusted by the
-// client's machine.
-func createAuthProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *AuthProxy {
-	log.Println("creating the proxy")
-	caCert, caKey, err := loadCaCert(caCertFile, caKeyFile)
-	if err != nil {
-		log.Fatal("Error loading CA certificate/key:", err)
-	}
-	log.Printf("loaded CA certificate and key; IsCA=%v\n", caCert.IsCA)
-
-	return &AuthProxy{
-		caCert:            caCert,
-		caKey:             caKey,
-		useEcp:            useEcp,
-		callCustomerProxy: callCustomerProxy,
-	}
-}
-
-func createAuthProxyUseCertObject(caCert *x509.Certificate, caKey crypto.PrivateKey, useEcp bool, callCustomerProxy bool) *AuthProxy {
-	return &AuthProxy{
-		caCert:            caCert,
-		caKey:             caKey,
-		useEcp:            useEcp,
-		callCustomerProxy: callCustomerProxy,
-	}
-}
-
-func (p *AuthProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	log.Println("serve http")
-	if req.Method == http.MethodConnect {
-		p.proxyConnect(w, req)
-	} else {
-		http.Error(w, "this proxy only supports CONNECT", http.StatusMethodNotAllowed)
-	}
-}
-
-func createProxyToServerClient(useEcp bool, callCustomerProxy bool) *http.Client {
-	var clientCertSource Source
-	var err error
-	if useEcp {
-		clientCertSource, err = NewEnterpriseCertificateProxySource("")
-	} else {
-		clientCertSource, err = NewSecureConnectSource()
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if callCustomerProxy {
-		customerProxy, _ := url.Parse("http://127.0.0.1:8888")
-		httpClient := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					GetClientCertificate: clientCertSource,
-				},
-				// Disable http 2.0
-				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-				Proxy:        http.ProxyURL(customerProxy),
-			},
-		}
-		return httpClient
-	}
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				GetClientCertificate: clientCertSource,
-			},
-			// Disable http 2.0
-			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		},
-	}
-	return httpClient
-}
-
-func (p *AuthProxy) proxyConnectTunnel(w http.ResponseWriter, req *http.Request) {
+func (p *AuthProxy) proxyConnectConventional(w http.ResponseWriter, req *http.Request) {
 	targetConn, err := net.Dial("tcp", req.Host)
 	if err != nil {
 		log.Println("failed to dial to target", req.Host)
@@ -417,6 +335,8 @@ func tunnelConn(dst io.WriteCloser, src io.ReadCloser) {
 	dst.Close()
 	src.Close()
 }
+
+//=============================== 2.2 MITM proxy ========================
 
 // proxyConnect implements the MITM proxy for CONNECT tunnels.
 func (p *AuthProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Request) {
@@ -517,18 +437,6 @@ func (p *AuthProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Reque
 	}
 }
 
-func (p *AuthProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
-	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
-
-	if strings.Contains(proxyReq.Host, "mtls.googleapis.com") {
-		log.Println("Using MITM proxy")
-		p.proxyConnectMitm(w, proxyReq)
-	} else {
-		log.Println("Using tunnel proxy")
-		p.proxyConnectTunnel(w, proxyReq)
-	}
-}
-
 // changeRequestToTarget modifies req to be re-routed to the given target;
 // the target should be taken from the Host of the original tunnel (CONNECT)
 // request.
@@ -550,6 +458,104 @@ func addrToUrl(addr string) *url.URL {
 		log.Fatal(err)
 	}
 	return u
+}
+
+func createProxyToServerClient(useEcp bool, callCustomerProxy bool) *http.Client {
+	var clientCertSource Source
+	var err error
+	if useEcp {
+		clientCertSource, err = NewEnterpriseCertificateProxySource("")
+	} else {
+		clientCertSource, err = NewSecureConnectSource()
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if callCustomerProxy {
+		customerProxy, _ := url.Parse("http://127.0.0.1:8888")
+		httpClient := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					GetClientCertificate: clientCertSource,
+				},
+				// Disable http 2.0
+				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+				Proxy:        http.ProxyURL(customerProxy),
+			},
+		}
+		return httpClient
+	}
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				GetClientCertificate: clientCertSource,
+			},
+			// Disable http 2.0
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		},
+	}
+	return httpClient
+}
+
+//=============================== 2.3 auth proxy ========================
+
+// AuthProxy is a type implementing http.Handler that serves as a MITM proxy
+// for CONNECT tunnels. Create new instances of AuthProxy using createAuthProxy.
+type AuthProxy struct {
+	caCert            *x509.Certificate
+	caKey             crypto.PrivateKey
+	useEcp            bool
+	callCustomerProxy bool
+}
+
+// createAuthProxy creates a new MITM proxy. It should be passed the filenames
+// for the certificate and private key of a certificate authority trusted by the
+// client's machine.
+func createAuthProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *AuthProxy {
+	log.Println("creating the proxy")
+	caCert, caKey, err := loadCaCert(caCertFile, caKeyFile)
+	if err != nil {
+		log.Fatal("Error loading CA certificate/key:", err)
+	}
+	log.Printf("loaded CA certificate and key; IsCA=%v\n", caCert.IsCA)
+
+	return &AuthProxy{
+		caCert:            caCert,
+		caKey:             caKey,
+		useEcp:            useEcp,
+		callCustomerProxy: callCustomerProxy,
+	}
+}
+
+func createAuthProxyUseCertObject(caCert *x509.Certificate, caKey crypto.PrivateKey, useEcp bool, callCustomerProxy bool) *AuthProxy {
+	return &AuthProxy{
+		caCert:            caCert,
+		caKey:             caKey,
+		useEcp:            useEcp,
+		callCustomerProxy: callCustomerProxy,
+	}
+}
+
+func (p *AuthProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	log.Println("serve http")
+	if req.Method == http.MethodConnect {
+		p.proxyConnect(w, req)
+	} else {
+		http.Error(w, "this proxy only supports CONNECT", http.StatusMethodNotAllowed)
+	}
+}
+
+func (p *AuthProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
+	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
+
+	if strings.Contains(proxyReq.Host, "mtls.googleapis.com") {
+		log.Println("Using MITM proxy")
+		p.proxyConnectMitm(w, proxyReq)
+	} else {
+		log.Println("Using conventional proxy")
+		p.proxyConnectConventional(w, proxyReq)
+	}
 }
 
 func main() {
