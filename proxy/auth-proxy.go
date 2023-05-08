@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -159,6 +161,66 @@ func (s *ecpSource) getClientCertificate(info *tls.CertificateRequestInfo) (*tls
 	return &cert, nil
 }
 
+// =================== 1.3 custom CA cert ====================
+
+// Generate CA cert/key on the fly.
+func createCaCert() (*x509.Certificate, crypto.PrivateKey, error) {
+	// create private key
+	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// create self signed cert as CA cert
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2019),
+		Subject: pkix.Name{
+			Organization: []string{"googleapis auth proxy"},
+			Country:      []string{"US"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		IsCA:                  true,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// dump cert to pem
+	certPem := new(bytes.Buffer)
+	pem.Encode(certPem, &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certBytes,
+	})
+	log.Println(certPem.String())
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return nil, nil, err
+	}
+	caCertFilePath := filepath.Join(currentDir, "certs", "ca_cert.pem")
+	f, err := os.OpenFile(caCertFilePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, err := f.Write(certPem.Bytes()); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, nil, err
+	}
+
+	return cert, key, nil
+}
+
 //============================== 2. Proxy ===============================
 
 // createCert creates a new certificate/private key pair for the given domains,
@@ -244,7 +306,7 @@ func loadX509KeyPair(certFile, keyFile string) (cert *x509.Certificate, key any,
 // for CONNECT tunnels. Create new instances of mitmProxy using createMitmProxy.
 type mitmProxy struct {
 	caCert            *x509.Certificate
-	caKey             any
+	caKey             crypto.PrivateKey
 	useEcp            bool
 	callCustomerProxy bool
 }
@@ -252,7 +314,7 @@ type mitmProxy struct {
 // createMitmProxy creates a new MITM proxy. It should be passed the filenames
 // for the certificate and private key of a certificate authority trusted by the
 // client's machine.
-func createMitmProxy(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *mitmProxy {
+func createMitmProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *mitmProxy {
 	log.Println("creating the proxy")
 	caCert, caKey, err := loadX509KeyPair(caCertFile, caKeyFile)
 	if err != nil {
@@ -260,6 +322,15 @@ func createMitmProxy(caCertFile, caKeyFile string, useEcp bool, callCustomerProx
 	}
 	log.Printf("loaded CA certificate and key; IsCA=%v\n", caCert.IsCA)
 
+	return &mitmProxy{
+		caCert:            caCert,
+		caKey:             caKey,
+		useEcp:            useEcp,
+		callCustomerProxy: callCustomerProxy,
+	}
+}
+
+func createMitmProxyUseCertObject(caCert *x509.Certificate, caKey crypto.PrivateKey, useEcp bool, callCustomerProxy bool) *mitmProxy {
 	return &mitmProxy{
 		caCert:            caCert,
 		caKey:             caKey,
@@ -490,11 +561,21 @@ func main() {
 	caCertFile := flag.String("cacertfile", caCertFilePath, "certificate .pem file for trusted CA")
 	caKeyFile := flag.String("cakeyfile", caKeyFilePath, "key .pem file for trusted CA")
 	useEcp := flag.Bool("useEcp", true, "If true use ECP otherwise use CBA as the cert source")
+	generateCaCert := flag.Bool("generateCaCert", true, "If true then the proxy creates CA cert/key at start time then write cert to ./certs/ca_cert.pem")
 	callCustomerProxy := flag.Bool("callCustomerProxy", false, "If true ECP proxy will call customer proxy at http://127.0.0.1:8888")
 	flag.Parse()
 
-	proxy := createMitmProxy(*caCertFile, *caKeyFile, *useEcp, *callCustomerProxy)
+	var proxy *mitmProxy
+	if *generateCaCert {
+		caCert, caKey, err := createCaCert()
+		if err != nil {
+			log.Fatal("error creating CA cert", err)
+		}
 
+		proxy = createMitmProxyUseCertObject(caCert, caKey, *useEcp, *callCustomerProxy)
+	} else {
+		proxy = createMitmProxyUseCaFilePath(*caCertFile, *caKeyFile, *useEcp, *callCustomerProxy)
+	}
 	log.Println("Starting proxy server on", *addr)
 	if err := http.ListenAndServe(*addr, proxy); err != nil {
 		log.Fatal("ListenAndServe:", err)
