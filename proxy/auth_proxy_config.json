@@ -8,11 +8,11 @@
         }
     },
     "customer_proxy": {
-        "addr": "http://127.0.0.1:8888",
+        "addr": "127.0.0.1:8888",
         "ca_cert_path": ""
     },
     "auth_proxy": {
-        "addr": "http://127.0.0.1:9999",
+        "addr": "127.0.0.1:9999",
         "ca_cert_path": "/usr/local/google/home/sijunliu/wks/proxy/test-app/proxy/certs/ca_cert.pem"
     }
 }
