@@ -221,7 +221,36 @@ func createCaCert() (*x509.Certificate, crypto.PrivateKey, error) {
 	return cert, key, nil
 }
 
-//============================== 2. Proxy ===============================
+// loadCaCert loads a certificate/key pair from files, and unmarshals them
+// into data structures from the x509 package. Note that private key types in Go
+// don't have a shared named interface and use `any` (for backwards
+// compatibility reasons).
+func loadCaCert(certFile, keyFile string) (cert *x509.Certificate, key any, err error) {
+	cf, err := ioutil.ReadFile(certFile)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	kf, err := ioutil.ReadFile(keyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	certBlock, _ := pem.Decode(cf)
+	cert, err = x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	keyBlock, _ := pem.Decode(kf)
+	key, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return cert, key, nil
+}
+
+// =================== 1.4 create cert for destination using custom CA cert ====================
 
 // createCert creates a new certificate/private key pair for the given domains,
 // signed by the parent/parentKey certificate. hoursValid is the duration of
@@ -241,7 +270,7 @@ func createCert(dnsNames []string, parent *x509.Certificate, parentKey crypto.Pr
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"Sample MITM proxy"},
+			Organization: []string{"Googleapis auth proxy"},
 		},
 		DNSNames:  dnsNames,
 		NotBefore: time.Now(),
@@ -273,56 +302,29 @@ func createCert(dnsNames []string, parent *x509.Certificate, parentKey crypto.Pr
 	return pemCert, pemKey
 }
 
-// loadX509KeyPair loads a certificate/key pair from files, and unmarshals them
-// into data structures from the x509 package. Note that private key types in Go
-// don't have a shared named interface and use `any` (for backwards
-// compatibility reasons).
-func loadX509KeyPair(certFile, keyFile string) (cert *x509.Certificate, key any, err error) {
-	cf, err := ioutil.ReadFile(certFile)
-	if err != nil {
-		return nil, nil, err
-	}
+//============================== 2. Proxy ===============================
 
-	kf, err := ioutil.ReadFile(keyFile)
-	if err != nil {
-		return nil, nil, err
-	}
-	certBlock, _ := pem.Decode(cf)
-	cert, err = x509.ParseCertificate(certBlock.Bytes)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	keyBlock, _ := pem.Decode(kf)
-	key, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return cert, key, nil
-}
-
-// mitmProxy is a type implementing http.Handler that serves as a MITM proxy
-// for CONNECT tunnels. Create new instances of mitmProxy using createMitmProxy.
-type mitmProxy struct {
+// AuthProxy is a type implementing http.Handler that serves as a MITM proxy
+// for CONNECT tunnels. Create new instances of AuthProxy using createAuthProxy.
+type AuthProxy struct {
 	caCert            *x509.Certificate
 	caKey             crypto.PrivateKey
 	useEcp            bool
 	callCustomerProxy bool
 }
 
-// createMitmProxy creates a new MITM proxy. It should be passed the filenames
+// createAuthProxy creates a new MITM proxy. It should be passed the filenames
 // for the certificate and private key of a certificate authority trusted by the
 // client's machine.
-func createMitmProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *mitmProxy {
+func createAuthProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, callCustomerProxy bool) *AuthProxy {
 	log.Println("creating the proxy")
-	caCert, caKey, err := loadX509KeyPair(caCertFile, caKeyFile)
+	caCert, caKey, err := loadCaCert(caCertFile, caKeyFile)
 	if err != nil {
 		log.Fatal("Error loading CA certificate/key:", err)
 	}
 	log.Printf("loaded CA certificate and key; IsCA=%v\n", caCert.IsCA)
 
-	return &mitmProxy{
+	return &AuthProxy{
 		caCert:            caCert,
 		caKey:             caKey,
 		useEcp:            useEcp,
@@ -330,8 +332,8 @@ func createMitmProxyUseCaFilePath(caCertFile, caKeyFile string, useEcp bool, cal
 	}
 }
 
-func createMitmProxyUseCertObject(caCert *x509.Certificate, caKey crypto.PrivateKey, useEcp bool, callCustomerProxy bool) *mitmProxy {
-	return &mitmProxy{
+func createAuthProxyUseCertObject(caCert *x509.Certificate, caKey crypto.PrivateKey, useEcp bool, callCustomerProxy bool) *AuthProxy {
+	return &AuthProxy{
 		caCert:            caCert,
 		caKey:             caKey,
 		useEcp:            useEcp,
@@ -339,7 +341,7 @@ func createMitmProxyUseCertObject(caCert *x509.Certificate, caKey crypto.Private
 	}
 }
 
-func (p *mitmProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (p *AuthProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println("serve http")
 	if req.Method == http.MethodConnect {
 		p.proxyConnect(w, req)
@@ -386,7 +388,7 @@ func createProxyToServerClient(useEcp bool, callCustomerProxy bool) *http.Client
 	return httpClient
 }
 
-func (p *mitmProxy) proxyConnectTunnel(w http.ResponseWriter, req *http.Request) {
+func (p *AuthProxy) proxyConnectTunnel(w http.ResponseWriter, req *http.Request) {
 	targetConn, err := net.Dial("tcp", req.Host)
 	if err != nil {
 		log.Println("failed to dial to target", req.Host)
@@ -417,7 +419,7 @@ func tunnelConn(dst io.WriteCloser, src io.ReadCloser) {
 }
 
 // proxyConnect implements the MITM proxy for CONNECT tunnels.
-func (p *mitmProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Request) {
+func (p *AuthProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Request) {
 	// "Hijack" the client connection to get a TCP (or TLS) socket we can read
 	// and write arbitrary data to/from.
 	hj, ok := w.(http.Hijacker)
@@ -515,7 +517,7 @@ func (p *mitmProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Reque
 	}
 }
 
-func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
+func (p *AuthProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
 	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
 
 	if strings.Contains(proxyReq.Host, "mtls.googleapis.com") {
@@ -565,16 +567,16 @@ func main() {
 	callCustomerProxy := flag.Bool("callCustomerProxy", false, "If true ECP proxy will call customer proxy at http://127.0.0.1:8888")
 	flag.Parse()
 
-	var proxy *mitmProxy
+	var proxy *AuthProxy
 	if *generateCaCert {
 		caCert, caKey, err := createCaCert()
 		if err != nil {
 			log.Fatal("error creating CA cert", err)
 		}
 
-		proxy = createMitmProxyUseCertObject(caCert, caKey, *useEcp, *callCustomerProxy)
+		proxy = createAuthProxyUseCertObject(caCert, caKey, *useEcp, *callCustomerProxy)
 	} else {
-		proxy = createMitmProxyUseCaFilePath(*caCertFile, *caKeyFile, *useEcp, *callCustomerProxy)
+		proxy = createAuthProxyUseCaFilePath(*caCertFile, *caKeyFile, *useEcp, *callCustomerProxy)
 	}
 	log.Println("Starting proxy server on", *addr)
 	if err := http.ListenAndServe(*addr, proxy); err != nil {
