@@ -3,10 +3,10 @@
 `client` folder contains a python app to talk to pubsub mtls endpoint via auth proxy. It calls pubsub list API twice, one without streaming and one with streaming.
 
 `proxy` folder contains:
-- `certs` folder: the CA cert used by the `auth-proxy.go`, the script inside the folder can be ran to generate the CA cert
-- `auth_proxy.go`: the https auth proxy, which passes through the non mtls.googleapis endpoints requests, and serves as MITM proxy for mtls.googleapis.com requests. For the latter case the MITM proxy can use either CBA or ECP cert to do mtls with mtls.googleapis.com. The network call is: client -> auth-proxy -> destination endpoint.
+- `certs` folder: the CA cert used by the `auth_proxy.go`, the script inside the folder can be ran to generate the CA cert
+- `auth_proxy.go`: the https auth proxy, which passes through the non mtls.googleapis endpoints requests, and serves as MITM proxy for mtls.googleapis.com requests. For the latter case the MITM proxy can use either CBA or ECP cert to do mtls with mtls.googleapis.com. The network call is: client -> auth_proxy -> destination endpoint.
 
-This auth proxy can also be configured to talk to any destination endpoints via a customer proxy. The network call is: client -> auth-proxy -> customer proxy -> destination endpoint.
+This auth proxy can also be configured to talk to any destination endpoints via a customer proxy. The network call is: client -> auth_proxy -> customer proxy -> destination endpoint.
 
 The auth proxy runs at http://127.0.0.1:9999
 - `customer_proxy.go`: a https pass through proxy for testing the customer proxy use case. It runs at http://127.0.0.1:8888
@@ -64,12 +64,12 @@ Open a terminal, and go to the `proxy` folder. Use the following command to run 
 
 E.g. for using CBA cert
 ```
-go run -v auth-proxy.go -useEcp false
+go run -v auth_proxy.go -useEcp false
 ```
 
 E.g. for using ECP cert
 ```
-go run -v auth-proxy.go
+go run -v auth_proxy.go
 ```
 
 Next let's open another terminal and go to the `client` folder, run the python app with `python app.py`. The app should run successfully. You can look at the log from the terminal that runs auth proxy to see what requests are mode.
@@ -78,12 +78,12 @@ Next let's open another terminal and go to the `client` folder, run the python a
 
 First start the customer proxy in `proxy` folder in a new terminal by running
 ```
-go run -v customer-proxy.go
+go run -v customer_proxy.go
 ```
 
 Then start the auth proxy in `proxy` folder in a new terminal by running
 ```
-go run -v auth-proxy.go -callCustomerProxy true
+go run -v auth_proxy.go -callCustomerProxy true
 ```
 Note that we need to set `callCustomerProxy` to true.
 
