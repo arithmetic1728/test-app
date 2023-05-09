@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/googleapis/enterprise-certificate-proxy/client"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 //============================= 1. cert utilities ========================
@@ -295,6 +297,12 @@ func (p *AuthProxy) proxyConnectMitm(w http.ResponseWriter, proxyReq *http.Reque
 		// to the target server.
 		changeRequestToTarget(r, proxyReq.Host)
 
+		// Add the access token if needed
+		if p.config.CredConfig.Type == "adc" {
+			token := getToken()
+			r.Header.Add("Authorization", "Bearer "+token)
+		}
+
 		// Send the request to the target server and log the response.
 		httpClient := p.createProxyToServerClient()
 
@@ -338,31 +346,46 @@ func addrToUrl(addr string) *url.URL {
 	return u
 }
 
-func (p *AuthProxy) createProxyToServerClient() *http.Client {
-	clientCertSource, err := NewEnterpriseCertificateProxySource(p.config.Transport.Ecp.JsonPath)
+func getToken() string {
+	tokenSource, err := google.DefaultTokenSource(oauth2.NoContext, "")
+	if err != nil {
+		log.Fatal("cannot get adc token", err)
+	}
+	newToken, err := tokenSource.Token()
 	if err != nil {
 		log.Fatal(err)
+	}
+	return newToken.AccessToken
+}
+
+func (p *AuthProxy) createProxyToServerClient() *http.Client {
+	tlsConfig := tls.Config{}
+	if p.config.Transport.Ecp.JsonPath != "" {
+		clientCertSource, err := NewEnterpriseCertificateProxySource(p.config.Transport.Ecp.JsonPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tlsConfig = tls.Config{
+			GetClientCertificate: clientCertSource,
+		}
 	}
 
 	if p.config.CustomerProxy.Addr != "" {
 		customerProxy, _ := url.Parse(p.config.CustomerProxy.Addr)
 		httpClient := &http.Client{
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					GetClientCertificate: clientCertSource,
-				},
+				TLSClientConfig: &tlsConfig,
 				// Disable http 2.0
 				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 				Proxy:        http.ProxyURL(customerProxy),
 			},
 		}
+		log.Println("Using customer proxy")
 		return httpClient
 	}
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				GetClientCertificate: clientCertSource,
-			},
+			TLSClientConfig: &tlsConfig,
 			// Disable http 2.0
 			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 		},
@@ -391,8 +414,23 @@ func (p *AuthProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (p *AuthProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) {
 	log.Printf("CONNECT requested to %v (from %v)", proxyReq.Host, proxyReq.RemoteAddr)
+	useMitm := false
 
-	if strings.Contains(proxyReq.Host, "mtls.googleapis.com") {
+	if p.config.Transport.Ecp.JsonPath != "" && strings.Contains(proxyReq.Host, p.config.Transport.Ecp.Pattern) {
+		useMitm = true
+	}
+	if p.config.CredConfig.Type == "adc" {
+		if strings.Contains(proxyReq.Host, p.config.CredConfig.Pattern) {
+			useMitm = true
+		}
+		for _, val := range p.config.CredConfig.Exclude {
+			if strings.Contains(proxyReq.Host, val.Pattern) {
+				useMitm = false
+			}
+		}
+	}
+
+	if useMitm {
 		log.Println("Using MITM proxy")
 		p.proxyConnectMitm(w, proxyReq)
 	} else {
@@ -402,12 +440,19 @@ func (p *AuthProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 }
 
 // ============================ 2.4 auth proxy config json =====================
+type Exclude []struct {
+	Pattern string `json:"pattern"`
+}
+
 type CredConfig struct {
-	Type string `json:"type"`
+	Type    string  `json:"type"`
+	Pattern string  `json:"pattern"`
+	Exclude Exclude `json:"exclude"`
 }
 
 type EcpConfig struct {
 	JsonPath string `json:"certificate_config_json_path"`
+	Pattern  string `json:"pattern"`
 }
 
 type TransportConfig struct {

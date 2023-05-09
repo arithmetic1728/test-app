@@ -1,14 +1,24 @@
 {
     "credential": {
-        "type": "adc"
+        "type": "adc",
+        "pattern": "googleapis.com",
+        "exclude": [
+            {
+                "pattern": "oauth2.googleapis.com"
+            },
+            {
+                "pattern": "play.googleapis.com"
+            }
+        ]
     },
     "transport": {
         "enterprise_certificate": {
-            "certificate_config_json_path": "/usr/local/google/home/sijunliu/.config/gcloud/certificate_config.json"
+            "certificate_config_json_path": "/usr/local/google/home/sijunliu/.config/gcloud/certificate_config.json",
+            "pattern": "mtls.googleapis.com"
         }
     },
     "customer_proxy": {
-        "addr": "127.0.0.1:8888",
+        "addr": "http://127.0.0.1:8888",
         "ca_cert_path": ""
     },
     "auth_proxy": {
