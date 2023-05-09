@@ -187,11 +187,49 @@ func createCert(dnsNames []string, parent *x509.Certificate, parentKey crypto.Pr
 //========== 2.1 Conventional pass through proxy ========================
 
 func (p *AuthProxy) proxyConnectConventional(w http.ResponseWriter, req *http.Request) {
-	targetConn, err := net.Dial("tcp", req.Host)
-	if err != nil {
-		log.Println("failed to dial to target", req.Host)
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
+	var targetConn net.Conn
+	var err error
+	if p.config.CustomerProxy.Addr != "" {
+		connectReq := &http.Request{
+			Method: "CONNECT",
+			URL:    &url.URL{Opaque: req.Host},
+			Host:   req.Host,
+			Header: make(http.Header),
+		}
+		customer_proxy_addr, err := url.Parse(p.config.CustomerProxy.Addr)
+		if err != nil {
+			log.Fatal("failed to parse customer proxy addr", err)
+		}
+		targetConn, err = net.Dial("tcp", customer_proxy_addr.Host)
+		if err != nil {
+			log.Fatal("failed to dail host", err)
+		}
+		connectReq.Write(targetConn)
+		// Read response.
+		// Okay to use and discard buffered reader here, because
+		// TLS server will not speak until spoken to.
+		br := bufio.NewReader(targetConn)
+		resp, err := http.ReadResponse(br, connectReq)
+		if err != nil {
+			targetConn.Close()
+			log.Fatal("failed to read response: ", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			resp, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				log.Fatal("failed to read response body", err)
+			}
+			targetConn.Close()
+			log.Fatal("proxy refused connection", string(resp))
+		}
+	} else {
+		targetConn, err = net.Dial("tcp", req.Host)
+		if err != nil {
+			log.Println("failed to dial to target", req.Host)
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
