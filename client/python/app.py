@@ -10,7 +10,7 @@ proxies = {
   'https': 'http://127.0.0.1:9999',
 }
 
-ca_cert_path = os.path.join(os.getcwd(), os.pardir, "proxy", "certs", "ca_cert.pem")
+ca_cert_path = os.path.join(os.getcwd(), os.pardir, os.pardir, "proxy", "certs", "ca_cert.pem")
 
 def run_with_https(stream=False):
   authed_session = AuthorizedSession(credentials)
