@@ -8,7 +8,15 @@
 - `auth_proxy_config.json`: the configuration file for auth proxy. It can be configured to attach auth tokens, set up mTLS transport with enterprise cert, and talk to server via customer's proxy.
 - `customer_proxy.go`: a simple pass through proxy for testing the customer proxy use case. It runs at http://127.0.0.1:8888
 
-# 2. Run the proxy
+# 2. Generate Certificates for Auth Proxy
+
+**NOTE**: This command requires OpenSSL.
+
+```bash
+$ ./proxy/certs/generate_cert.sh
+```
+
+# 3. Run the proxy
 
 First start the customer proxy in `proxy` folder in a new terminal by running
 ```
@@ -20,7 +28,7 @@ Then start the auth proxy in `proxy` folder in a new terminal by running
 go run -v auth_proxy.go
 ```
 
-# 3. Test with the python app
+# 4. Test with the python app
 
 Open a new terminal in `client/python` folder.
 
@@ -42,7 +50,7 @@ python app_no_cred.py
 
 You can make sure the customer proxy is used by looking at the log.
 
-# 4. Test with gcloud
+# 5. Test with gcloud
 
 First run the following with "sijunliu@beyondcorp.us" account and `sijunliu-dca-test` project.
 
@@ -72,7 +80,7 @@ Next run
 gcloud pubsub topics list
 ```
 
-# 5. Test with Java sample
+# 6. Test with Java sample
 
 Navigate to `client/java-sample` folder, run
 
